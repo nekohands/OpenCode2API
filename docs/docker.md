@@ -142,7 +142,7 @@ logging:
 
 ## ✅ 健康检查
 
-服务配置了健康检查:
+镜像内置了健康检查，compose 里也可以显式声明：
 
 ```yaml
 healthcheck:
@@ -153,17 +153,73 @@ healthcheck:
   start_period: 60s
 ```
 
+> ⚠️ 两点容易踩：
+>
+> 1. **探 `/health`，不要探 `/v1/models`。** 后者需要 `Authorization: Bearer`，探测请求不带
+>    凭证会返回 401，把一个完全正常的容器标记成 unhealthy。`/health` 是唯一免鉴权的操作端点。
+> 2. **用 `curl`，不要用 `wget`。** `curl` 在 Dockerfile 里是显式安装的；`wget` 是否存在于
+>    基础镜像 `node:lts-slim` 随版本变化，不保证。
+
 ---
 
 ## ❓ 常见问题
 
-### 容器无法启动
+### 容器无法启动 / 反复重启
 
-检查日志:
 ```bash
-docker compose logs
+docker compose logs --tail=100 opencode
 ```
+
+按报错对症：
+
+| 现象 | 原因与处理 |
+|:-----|:-----------|
+| `Address already in use` | `ipv4_address` 撞上了 Docker 网关。**`.1` 通常是网段网关**，容器固定 IP 请从 `.2` 起。用 `docker network inspect <net> --format '{{range .IPAM.Config}}{{.Subnet}} {{.Gateway}}{{end}}'` 确认 |
+| `Timeout waiting for OpenCode Server` | 后端 `opencode serve` 30 秒内没起来。看日志里 opencode 自己的输出；常见于数据目录权限问题，或 `OPENCODE_SERVER_PORT` 改了但 `OPENCODE_SERVER_URL` 没跟着改 |
+| 启动即退出，日志提到 postinstall | 镜像里的 opencode 是坏的。构建时已用 `opencode --version` 校验过，正常不会出现；若出现请重建镜像 |
+
+### 容器是 healthy 但外面访问不了
+
+如果前面有 Traefik / Nginx 之类的反代，按顺序检查：
+
+1. **Traefik 选了错误的网络。** 容器接入多个网络时必须显式声明，否则 Traefik 可能取到另一个
+   网段的 IP，表现为 502：
+
+   ```yaml
+   - "traefik.docker.network=docker-net"
+   ```
+
+2. **不要给这个服务挂 `buffering` 中间件。** 这是 SSE 网关，buffering 会等整个响应缓冲完才
+   转发，`/v1/chat/completions` 的流式输出会退化成「等模型全部生成完才返回」，客户端通常直接
+   超时。`compress` 中间件对 SSE 也可能有问题。
+
+3. 反代侧的读超时不要小于 `OPENCODE_PROXY_REQUEST_TIMEOUT_MS`（默认 180000ms）。
+
+### healthcheck 显示 unhealthy
+
+见上面「健康检查」—— 九成是探了 `/v1/models`（401）或用了 `wget`。
+
+### 挂载的 opencode.json 被改写
+
+`OPENCODE_PROXY_PROMPT_MODE=plugin-inject` 会在启动时向
+`/home/node/.config/opencode/opencode.json` 注册一个空插件，而该目录通常是从宿主机挂载的，
+改动会**落盘到宿主机**。当前版本是合并写入（保留已有的 provider / model / instructions），
+但仍请确认这是你要的行为；不需要就保持默认的 `standard`。
 
 ### 挂载权限问题
 
-确保 PUID/PGID 配置正确 (默认 1000:1000)。
+确保 PUID/PGID 配置正确（默认 1000:1000）。容器以 root 启动，入口脚本按 PUID/PGID 调整
+`node` 用户，并对数据目录、配置目录、项目目录执行 `chown -R`。宿主机目录文件极多时这一步
+可能耗时较久。
+
+### 怎么快速确认容器本身是好的
+
+绕开反代，直接在容器里打自己：
+
+```bash
+docker compose exec opencode curl -s http://localhost:10000/health
+docker compose exec opencode curl -s -H "Authorization: Bearer $API_KEY" http://localhost:10000/v1/models
+```
+
+两条都通，说明容器没问题，故障在反代 / 网络层。
+

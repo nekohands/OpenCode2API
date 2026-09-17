@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "test": "NODE_OPTIONS=--experimental-vm-modules jest --runInBand --detectOpenHandles",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand --detectOpenHandles",
     "test:unit": "npm test",
     "test:integration": "bash tests/test-integration.sh"
   },
