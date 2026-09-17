@@ -4,7 +4,9 @@
 #
 #   ./scripts/diagnose-traefik.sh [app_container] [traefik_container]
 #
-# Defaults: app_container=opencode2api   traefik_container=traefik
+# Defaults: traefik_container=traefik. The app container is auto-detected from the
+# container whose image matches opencode2api, so a renamed container (opencode,
+# oc2api, ...) still works; pass a name explicitly to override.
 #
 # Background: Traefik answers a request with a plain-text "404 page not found\n"
 # (19 bytes, Go's http.NotFound) when NO router matches. It answers 502/503 when a
@@ -18,7 +20,7 @@
 
 set -u
 
-APP="${1:-opencode2api}"
+APP="${1:-}"
 TRAEFIK="${2:-traefik}"
 
 PROXY_PORT="${OPENCODE_PROXY_PORT:-10000}"
@@ -29,6 +31,26 @@ warn()  { printf '  !! %s\n' "$*"; }
 info()  { printf '  %s\n' "$*"; }
 
 command -v docker >/dev/null 2>&1 || { echo "docker not found in PATH"; exit 1; }
+
+# The container is not always called opencode2api -- deployments rename it freely
+# (opencode, oc2api, ...). When the name is missing or wrong, look for whatever
+# container runs this project's image so the caller does not have to know it.
+if [ -z "$APP" ] || ! docker inspect "$APP" >/dev/null 2>&1; then
+    guess=$(docker ps -a --format '{{.Names}} {{.Image}}' 2>/dev/null \
+        | grep -i 'opencode2api' | awk '{print $1}' | head -1)
+    if [ -n "$guess" ]; then
+        if [ -n "$APP" ]; then
+            warn "no container named '${APP}'; using '${guess}' instead (image matches opencode2api)"
+        else
+            info "app container auto-detected as '${guess}'"
+        fi
+        APP="$guess"
+    elif [ -z "$APP" ]; then
+        warn "no container name given and none found whose image matches opencode2api"
+        warn "usage: $0 [app_container] [traefik_container]"
+        exit 1
+    fi
+fi
 
 inspect() { docker inspect -f "$2" "$1" 2>/dev/null; }
 
