@@ -1,0 +1,28 @@
+# Line endings.
+#
+# The repository is checked out on Windows with core.autocrlf=true, which rewrites
+# LF to CRLF in the working tree. That is harmless for most files but fatal for the
+# two below:
+#
+#   entrypoint.sh  is COPYed into a Linux image and executed via its shebang. A CRLF
+#                  file makes the kernel look for "/bin/bash\r", and the container
+#                  dies at startup with "bad interpreter: No such file or directory".
+#                  The same applies to any script under scripts/.
+#   Dockerfile     is parsed by BuildKit; keep it LF so line continuations and the
+#                  parser's expectations are never in question.
+#
+# `eol=lf` pins the working-tree copy to LF regardless of core.autocrlf, so a local
+# `docker compose up --build` on Windows produces the same image as CI does.
+*.sh          text eol=lf
+Dockerfile    text eol=lf
+*.dockerfile  text eol=lf
+
+# This file too: a stray CR on the last line would become part of the pattern.
+.gitattributes text eol=lf
+
+# Config and docs: normalise to LF in the repository, let git decide the checkout.
+*.yml         text
+*.yaml        text
+*.json        text
+*.js          text
+*.md          text

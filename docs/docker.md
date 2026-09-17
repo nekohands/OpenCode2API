@@ -38,6 +38,15 @@ curl http://127.0.0.1:10000/health
 curl -H "Authorization: Bearer $API_KEY" http://127.0.0.1:10000/v1/models
 ```
 
+想一次把「能不能真正调通模型」测完（含流式、首字节延迟、后端端口是否外泄），用：
+
+```bash
+BASE_URL=http://127.0.0.1:10000 API_KEY=$API_KEY ./scripts/test-api.sh
+```
+
+脚本会自动挑一个模型，分别发一次非流式和一次流式请求，并把 Traefik 自己的
+`404 page not found`、以及 buffering 导致的「流式退化成一次性返回」识别出来。
+
 ---
 
 ## ⚙️ 配置说明
@@ -177,6 +186,48 @@ docker compose logs --tail=100 opencode
 | `Address already in use` | `ipv4_address` 撞上了 Docker 网关。**`.1` 通常是网段网关**，容器固定 IP 请从 `.2` 起。用 `docker network inspect <net> --format '{{range .IPAM.Config}}{{.Subnet}} {{.Gateway}}{{end}}'` 确认 |
 | `Timeout waiting for OpenCode Server` | 后端 `opencode serve` 30 秒内没起来。看日志里 opencode 自己的输出；常见于数据目录权限问题，或 `OPENCODE_SERVER_PORT` 改了但 `OPENCODE_SERVER_URL` 没跟着改 |
 | 启动即退出，日志提到 postinstall | 镜像里的 opencode 是坏的。构建时已用 `opencode --version` 校验过，正常不会出现；若出现请重建镜像 |
+
+### 反代返回 `404 page not found`
+
+```console
+$ curl -i https://your-host:99/health
+HTTP/1.1 404 Not Found
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+Content-Length: 19
+
+404 page not found
+```
+
+**这个响应不是本项目的。** 本项目所有 404 都是 JSON（`src/proxy.js` 里
+`res.status(404).json(...)`），`/health` 更是必然返回 JSON。而 `404 page not found\n`
+正好 19 字节、纯文本、带 `X-Content-Type-Options: nosniff`，这是 **Go 的 `http.NotFound`**，
+也就是 Traefik 自己的兜底响应。
+
+Traefik 的两种兜底要分清楚：
+
+| 响应 | 含义 |
+|:--|:--|
+| `404 page not found`（纯文本） | **没有路由匹配** —— 请求根本没到容器 |
+| `502` / `503` | 路由匹配了，但后端不可达 —— 容器没起或端口写错 |
+
+看到 404 就别再怀疑应用了，按顺序查：
+
+1. **容器在跑吗。** `docker compose ps`。容器没起来，它的 router 会被 Traefik 丢弃 → 404。
+2. **`ipv4_address` 是不是撞了网关。** `172.20.5.0/24` 的 `.1` 是 Docker 网关，容器不能再占，
+   否则 `docker compose up` 直接报 `Address already in use`，容器根本创建不出来。固定 IP 从 `.2` 起。
+3. **labels 生效了吗。** `docker inspect <容器> -f '{{json .Config.Labels}}'`。若 Traefik 配了
+   `providers.docker.exposedByDefault=false`，缺 `traefik.enable=true` 的容器会被完全忽略。
+4. **entrypoint 对得上吗。** router 上的 `traefik.http.routers.<name>.entrypoints` 必须包含你
+   实际连接的那个入口点。router 写在 `websecure`（443）而你连 `:99`，结果就是这个 404。
+5. **Traefik 能看见 Docker 吗。** Traefik 容器必须挂 `/var/run/docker.sock`，否则一个容器都发现
+   不了，所有域名全 404。
+
+一次跑完上面这些检查：
+
+```bash
+./scripts/diagnose-traefik.sh opencode2api traefik
+```
 
 ### 容器是 healthy 但外面访问不了
 
