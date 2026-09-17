@@ -100,13 +100,19 @@ docker build -t my-opencode2api .
 ```bash
 docker run -d \
   -p 10000:10000 \
-  -p 10001:10001 \
   -e API_KEY=your-key \
   -e OPENCODE_SERVER_PASSWORD=your-password \
   -v opencode-data:/home/node/.local/share/opencode \
   -v opencode-config:/home/node/.config/opencode \
   my-opencode2api
 ```
+
+> **不要发布 `10001`。** 10000 是对外的 OpenAI 兼容代理，10001 是它背后的 `opencode serve`，
+> 两者不是一回事。后端暴露出去意味着 `POST /session/:id/shell`（执行 shell）和
+> `GET /file/content`（读任意文件）直接可达，而 `OPENCODE_SERVER_PASSWORD` 一旦为空就完全无认证。
+> 实测一个 `opencode-internal` 风格的 router 指向 10001 时，`/config`、`/session`、`/agent`、
+> `/command` 全部返回 200，无需任何凭据。真要在宿主机上调试后端，请只绑回环：
+> `-p 127.0.0.1:10001:10001`。
 
 ---
 
@@ -213,20 +219,51 @@ Traefik 的两种兜底要分清楚：
 
 看到 404 就别再怀疑应用了，按顺序查：
 
-1. **容器在跑吗。** `docker compose ps`。容器没起来，它的 router 会被 Traefik 丢弃 → 404。
-2. **`ipv4_address` 是不是撞了网关。** `172.20.5.0/24` 的 `.1` 是 Docker 网关，容器不能再占，
+1. **一个容器声明了多个 service 时，router 会被丢掉。** 这是最容易踩的一条，且症状极隐蔽 ——
+   Traefik 的日志里只有一行 `ERR`，其余一切正常。若同一个容器既定义了
+   `traefik.http.services.opencode.*` 又定义了 `traefik.http.services.opencode-internal.*`，
+   Traefik 无法判断 router 该挂到哪个 service 上，于是：
+
+   ```
+   ERR Router opencode cannot be linked automatically with multiple Services:
+       ["opencode-internal" "opencode"] providerName=docker routerName=opencode
+   ```
+
+   然后**整个 router 被丢弃**，该域名的所有请求都落到兜底 404。验证方式：
+
+   ```bash
+   # 1) 有没有这行 ERR
+   docker logs --tail 300 traefik 2>&1 | grep -i 'cannot be linked'
+
+   # 2) 该 router 在不在生效的路由表里(应能看到 opencode 这一项)
+   docker logs --tail 300 traefik 2>&1 | grep -o '"routers":{.*' | head -c 400
+   ```
+
+   修法是给 router 显式指定 service，别让 Traefik 去猜：
+
+   ```yaml
+   - "traefik.http.routers.opencode.service=opencode"
+   ```
+
+   **注意：只删掉 `opencode-internal` 的 router 标签是不够的** —— 只要
+   `traefik.http.services.opencode-internal.loadbalancer.server.port` 还在，容器就仍然声明着
+   两个 service，自动链接照样失败。router 和 service 标签要成对增删。
+
+2. **容器在跑吗。** `docker compose ps`。容器没起来，它的 router 会被 Traefik 丢弃 → 404。
+3. **`ipv4_address` 是不是撞了网关。** `172.20.5.0/24` 的 `.1` 是 Docker 网关，容器不能再占，
    否则 `docker compose up` 直接报 `Address already in use`，容器根本创建不出来。固定 IP 从 `.2` 起。
-3. **labels 生效了吗。** `docker inspect <容器> -f '{{json .Config.Labels}}'`。若 Traefik 配了
+4. **labels 生效了吗。** `docker inspect <容器> -f '{{json .Config.Labels}}'`。若 Traefik 配了
    `providers.docker.exposedByDefault=false`，缺 `traefik.enable=true` 的容器会被完全忽略。
-4. **entrypoint 对得上吗。** router 上的 `traefik.http.routers.<name>.entrypoints` 必须包含你
+5. **entrypoint 对得上吗。** router 上的 `traefik.http.routers.<name>.entrypoints` 必须包含你
    实际连接的那个入口点。router 写在 `websecure`（443）而你连 `:99`，结果就是这个 404。
-5. **Traefik 能看见 Docker 吗。** Traefik 容器必须挂 `/var/run/docker.sock`，否则一个容器都发现
+6. **Traefik 能看见 Docker 吗。** Traefik 容器必须挂 `/var/run/docker.sock`，否则一个容器都发现
    不了，所有域名全 404。
 
 一次跑完上面这些检查：
 
 ```bash
-./scripts/diagnose-traefik.sh opencode2api traefik
+./scripts/diagnose-traefik.sh              # 容器名会自动从镜像识别
+./scripts/diagnose-traefik.sh opencode traefik   # 也可以显式指定
 ```
 
 ### 容器是 healthy 但外面访问不了

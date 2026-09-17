@@ -126,6 +126,26 @@ else
         || warn "no traefik.http.services.*.loadbalancer.server.port label; Traefik must guess the port"
     printf '%s' "$labels" | grep -q 'traefik.docker.network' \
         || warn "no traefik.docker.network label; when the container is on several networks Traefik may pick the wrong one"
+
+    # A router without an explicit .service label is auto-linked to the service Traefik
+    # finds on the container. When the container declares MORE THAN ONE service that is
+    # ambiguous: Traefik logs "cannot be linked automatically with multiple Services" and
+    # DROPS the router, so the hostname 404s while the container stays up and healthy.
+    # Nothing else in the logs looks wrong, which is what makes this one hard to spot.
+    nsvc=$(printf '%s\n' "$labels" | grep -c 'loadbalancer\.server\.port')
+    missing=""
+    for r in $(printf '%s\n' "$labels" \
+        | grep -o 'traefik\.http\.routers\.[A-Za-z0-9_-]*\.rule' \
+        | sed 's/\.rule$//' | sort -u); do
+        printf '%s\n' "$labels" | grep -q "^${r}\.service=" || missing="${missing} ${r##*.}"
+    done
+    if [ "$nsvc" -gt 1 ] && [ -n "$missing" ]; then
+        warn "container declares ${nsvc} services, but these routers have no explicit .service label:${missing}"
+        warn "Traefik cannot choose between them, logs 'cannot be linked automatically with"
+        warn "multiple Services' and DROPS the router -- that hostname 404s even though the"
+        warn "container is healthy. Fix: add traefik.http.routers.<name>.service=<service> for"
+        warn "each router, or delete the extra service (its router AND service labels go together)."
+    fi
 fi
 
 rule; echo "5. Traefik itself"
