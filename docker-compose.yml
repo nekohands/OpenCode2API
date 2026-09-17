@@ -32,6 +32,10 @@ services:
       - opencode-config:/home/node/.config/opencode
     restart: unless-stopped
     healthcheck:
+      # Probe /health, not /v1/models. /health is the one operational endpoint that is
+      # exempt from the Bearer check, so this works as soon as API_KEY is set; probing
+      # /v1/models returns 401 and marks a perfectly healthy container as unhealthy.
+      # `curl` is guaranteed present (the Dockerfile installs it); `wget` is not.
       test: ["CMD", "curl", "-f", "http://localhost:${OPENCODE_PROXY_PORT:-10000}/health"]
       interval: 30s
       timeout: 10s

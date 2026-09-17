@@ -52,11 +52,19 @@ OPENCODE_SERVER_PASSWORD=change-me-too
 # 安全相关
 DISABLE_TOOLS=true
 
-# 可选配置
-OPENCODE_PROXY_PROMPT_MODE=plugin-inject
-OPENCODE_PROXY_OMIT_SYSTEM_PROMPT=true
-OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=true
+# 可选配置（下面三项是默认值，通常不需要修改）
+OPENCODE_PROXY_PROMPT_MODE=standard
+OPENCODE_PROXY_OMIT_SYSTEM_PROMPT=false
+OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=false
 ```
+
+> ⚠️ 这三项每一项都会**静默改变行为**，排障时很难定位，请确认理解后再开：
+>
+> | 配置 | 打开后的效果 |
+> |:-----|:-------------|
+> | `OPENCODE_PROXY_PROMPT_MODE=plugin-inject` | 启动时会改写 `/home/node/.config/opencode/opencode.json`（该目录通常从宿主机挂载，改动会落盘到宿主机） |
+> | `OPENCODE_PROXY_OMIT_SYSTEM_PROMPT=true` | 丢弃客户端传来的**全部** system prompt |
+> | `OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=true` | 按 `OPENCODE_PROXY_CLEANUP_MAX_AGE_MS`（默认 24 小时）**删除**历史会话存储 |
 
 ---
 

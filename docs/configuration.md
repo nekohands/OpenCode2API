@@ -201,9 +201,9 @@ OPENCODE_HEALTH_DETAILS_ENABLED=true
 OPENCODE_HEALTH_DETAILS_REQUIRE_AUTH=true
 OPENCODE_METRICS_ENABLED=false
 OPENCODE_METRICS_REQUIRE_AUTH=true
-OPENCODE_PROXY_PROMPT_MODE=plugin-inject
-OPENCODE_PROXY_OMIT_SYSTEM_PROMPT=true
-OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=true
+OPENCODE_PROXY_PROMPT_MODE=standard
+OPENCODE_PROXY_OMIT_SYSTEM_PROMPT=false
+OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=false
 ```
 
 
@@ -214,7 +214,7 @@ OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=true
 | 模式 | 说明 |
 |:-----|:-----|
 | **standard** (默认) | 标准模式，完整处理提示词 |
-| **plugin-inject** | 插件注入模式，减小模型侧提示词大小，通常与 `OMIT_SYSTEM_PROMPT=true` 配合使用 |
+| **plugin-inject** | 插件注入模式，减小模型侧提示词大小，通常与 `OMIT_SYSTEM_PROMPT=true` 配合使用。注意：该模式会在启动时向 `/home/node/.config/opencode/opencode.json` 注册一个空插件（容器场景下该目录通常从宿主机挂载），请确认这是你想要的 |
 
 ---
 
@@ -233,10 +233,15 @@ OPENCODE_HEALTH_DETAILS_ENABLED=true
 OPENCODE_HEALTH_DETAILS_REQUIRE_AUTH=true
 OPENCODE_METRICS_ENABLED=false
 OPENCODE_METRICS_REQUIRE_AUTH=true
-OPENCODE_PROXY_PROMPT_MODE=plugin-inject
-OPENCODE_PROXY_OMIT_SYSTEM_PROMPT=true
-OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=true
+OPENCODE_PROXY_PROMPT_MODE=standard
+OPENCODE_PROXY_OMIT_SYSTEM_PROMPT=false
+OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS=false
 ```
+
+> ⚠️ 上面最后三项保持默认值。它们曾作为推荐值出现在这里，但每一项都会静默改变行为：
+> `plugin-inject` 会改写 `/home/node/.config/opencode/opencode.json`（通常是从宿主机挂载的），
+> `OMIT_SYSTEM_PROMPT=true` 会丢弃全部 system prompt，
+> `AUTO_CLEANUP_CONVERSATIONS=true` 会按 `CLEANUP_MAX_AGE_MS`（默认 24 小时）删除历史会话存储。
 
 
 ### 💻 本地开发

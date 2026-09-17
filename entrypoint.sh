@@ -27,13 +27,38 @@ if [[ "${OPENCODE_PROXY_PROMPT_MODE:-standard}" == "plugin-inject" ]]; then
 export const Opencode2apiEmptyPlugin = async () => ({})
 export default Opencode2apiEmptyPlugin
 EOF
-    cat > /home/node/.config/opencode/opencode.json <<'EOF'
-{
-  "plugin": ["/home/node/.config/opencode/plugin/opencode2api-empty/index.js"],
-  "instructions": [],
-  "theme": "system"
-}
-EOF
+
+    # Merge into opencode.json instead of overwriting it.
+    #
+    # /home/node/.config/opencode is normally bind-mounted from the host, and operators
+    # keep their providers, models and instructions in this file. The previous version
+    # did a plain `cat >`, so every restart silently wiped that file back to a three-key
+    # stub — the container then came up with no usable provider/model configuration.
+    # Here we only ensure the plugin is registered, leaving everything else untouched.
+    CONFIG_FILE=/home/node/.config/opencode/opencode.json
+    PLUGIN_PATH=/home/node/.config/opencode/plugin/opencode2api-empty/index.js
+    node -e '
+        const fs = require("fs");
+        const file = process.argv[1];
+        const pluginPath = process.argv[2];
+        let cfg = {};
+        if (fs.existsSync(file)) {
+            try {
+                cfg = JSON.parse(fs.readFileSync(file, "utf8")) || {};
+            } catch (err) {
+                console.error("[entrypoint] opencode.json is not valid JSON (" + err.message + "); leaving it untouched.");
+                process.exit(0);
+            }
+        }
+        const plugins = Array.isArray(cfg.plugin) ? cfg.plugin : [];
+        if (!plugins.includes(pluginPath)) plugins.push(pluginPath);
+        cfg.plugin = plugins;
+        if (!Array.isArray(cfg.instructions)) cfg.instructions = [];
+        if (!cfg.theme) cfg.theme = "system";
+        fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+        console.log("[entrypoint] Registered plugin-inject plugin in " + file);
+    ' "$CONFIG_FILE" "$PLUGIN_PATH"
+
     chown -R node:node /home/node/.config/opencode
 fi
 
