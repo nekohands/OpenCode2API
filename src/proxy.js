@@ -232,15 +232,31 @@ async function getImageDataUri(url) {
     });
 }
 
-// --- Mutex Logic with Timeout ---
+// --- Concurrency gate ---
+// This was a plain mutex: exactly one /v1/chat/completions request could be in flight,
+// so a single slow stream blocked every other client. Nothing in the request path
+// actually requires that exclusivity — each request creates its own OpenCode session and
+// opens its own event subscription — but the backend's tolerance for parallel sessions
+// is undocumented, so the default stays at 1 to preserve existing behaviour. Raise it
+// with OPENCODE_PROXY_CONCURRENCY once you have confirmed your backend copes.
 const queue = [];
-let isProcessing = false;
+let activeRequests = 0;
+let maxConcurrentRequests = 1;
+
+function setMaxConcurrentRequests(value) {
+    const parsed = Number(value);
+    maxConcurrentRequests = Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1;
+    processQueue();
+}
 
 const STARTUP_WAIT_ITERATIONS = 60;
 const STARTUP_WAIT_INTERVAL_MS = 2000;
 const STARTING_WAIT_ITERATIONS = 120;
 const STARTING_WAIT_INTERVAL_MS = 1000;
-const DEFAULT_REQUEST_TIMEOUT_MS = 300000;
+// Matches the entrypoint default and the documented value. The two used to disagree
+// (300000 here, 180000 in index.js and the docs), so the effective timeout depended on
+// whether the proxy was started via index.js or embedded via startProxy().
+const DEFAULT_REQUEST_TIMEOUT_MS = 180000;
 const DEFAULT_POLL_INTERVAL_MS = 500;
 // Backoff base for transient upstream error retries (issue #5): 800ms, 1600ms.
 const RETRY_BACKOFF_BASE_MS = 800;
@@ -398,40 +414,43 @@ function resolveOpencodePath(requestedPath) {
 }
 
 function processQueue() {
-    if (isProcessing || queue.length === 0) return;
-    isProcessing = true;
-    const { task, timeout, resolve, reject } = queue.shift();
-    let settled = false;
-    const timeoutMs = timeout || 120000;
-    const timeoutId = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        reject(new Error(`Request timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
+    while (activeRequests < maxConcurrentRequests && queue.length > 0) {
+        const { task, timeout, resolve, reject } = queue.shift();
+        activeRequests += 1;
+        let settled = false;
+        const timeoutMs = timeout || DEFAULT_REQUEST_TIMEOUT_MS;
+        const timeoutId = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error(`Request timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
 
-    Promise.resolve()
-        .then(() => task())
-        .then((result) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeoutId);
-            resolve(result);
-        })
-        .catch((err) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeoutId);
-            reject(err);
-        })
-        .finally(() => {
-            isProcessing = false;
-            if (queue.length > 0) {
-                queueMicrotask(processQueue);
-            }
-        });
+        Promise.resolve()
+            .then(() => task())
+            .then((result) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                resolve(result);
+            })
+            .catch((err) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                reject(err);
+            })
+            .finally(() => {
+                // A task that already timed out keeps holding its slot until it really
+                // settles, because its work is still running against the backend.
+                activeRequests -= 1;
+                if (queue.length > 0) {
+                    queueMicrotask(processQueue);
+                }
+            });
+    }
 }
 
-function lock(task, timeout = 120000) {
+function lock(task, timeout = DEFAULT_REQUEST_TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
         queue.push({ task, timeout, resolve, reject });
         processQueue();
@@ -484,20 +503,12 @@ function cleanupTempDirs() {
 // Register cleanup on exit
 process.on('exit', cleanupTempDirs);
 
-// Handle signals - Unix-like systems
-if (process.platform !== 'win32') {
-    process.on('SIGINT', () => {
-        console.log('\n[Shutdown] Received SIGINT, cleaning up...');
-        cleanupTempDirs();
-        process.exit(0);
-    });
-    process.on('SIGTERM', () => {
-        console.log('\n[Shutdown] Received SIGTERM, cleaning up...');
-        cleanupTempDirs();
-        process.exit(0);
-    });
-}
-// Note: Windows signal handling is limited, cleanup is handled via process.on('exit')
+// Signal handling is owned by the entrypoint (index.js), which registers its own
+// SIGINT/SIGTERM handlers to call killBackend() before exiting. Handlers registered
+// here would run first (this module is loaded before the entrypoint body) and call
+// process.exit(0) immediately, so the backend spawned by this module would never be
+// torn down and would survive as an orphan process. The exit handler above still
+// runs on every exit path, including the entrypoint's graceful shutdown.
 
 /**
  * Create Express app with proper configuration
@@ -523,6 +534,7 @@ export function createApp(config) {
         AUTO_CLEANUP_CONVERSATIONS,
         CLEANUP_INTERVAL_MS,
         CLEANUP_MAX_AGE_MS,
+        DEFAULT_MODEL = '',
         OPENCODE_HOME_BASE
     } = config;
 
@@ -537,16 +549,6 @@ export function createApp(config) {
 
     const clientHeaders = buildBackendAuthHeaders(OPENCODE_SERVER_PASSWORD);
     const client = createOpencodeClient({ baseUrl: OPENCODE_SERVER_URL, headers: clientHeaders });
-
-    const isOperationalEndpointBypassed = (req) => {
-        if (req.path === '/health/details') {
-            return HEALTH_DETAILS_ENABLED && !HEALTH_DETAILS_REQUIRE_AUTH;
-        }
-        if (req.path === '/metrics') {
-            return METRICS_ENABLED && !METRICS_REQUIRE_AUTH;
-        }
-        return false;
-    };
 
     // Auth middleware
     app.use((req, res, next) => {
@@ -598,7 +600,18 @@ export function createApp(config) {
     const resolveRequestedModel = async (requestedModel) => {
         const providersList = await getProvidersList();
         const models = buildModelsList(providersList);
-        const fallbackModel = models[0]?.id || 'opencode/kimi-k2.5-free';
+        // A request that omits `model` used to land on models[0], i.e. whatever the backend
+        // happens to list first, which is not guaranteed to be reachable. DEFAULT_MODEL lets
+        // an operator pin a known-good model. The previous hardcoded fallback named
+        // 'opencode/kimi-k2.5-free', a model that no longer exists, so it could only ever
+        // produce a confusing model_not_found.
+        const fallbackModel = DEFAULT_MODEL || models[0]?.id || '';
+        if (!requestedModel && fallbackModel) {
+            logDebug('No model requested, using default', {
+                model: fallbackModel,
+                source: DEFAULT_MODEL ? 'DEFAULT_MODEL' : 'first-available'
+            });
+        }
         let [providerID, modelID] = (requestedModel || fallbackModel).split('/');
         if (!modelID) {
             modelID = providerID;
@@ -1114,10 +1127,17 @@ export function createApp(config) {
     };
 
     async function promptWithTimeout(promptParams, timeoutMs) {
+        let timeoutId;
         const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs);
+            timeoutId = setTimeout(() => reject(new Error(`Request timeout after ${timeoutMs}ms`)), timeoutMs);
         });
-        return Promise.race([client.session.prompt(promptParams), timeoutPromise]);
+        try {
+            return await Promise.race([client.session.prompt(promptParams), timeoutPromise]);
+        } finally {
+            // Without this the timer outlives the request and keeps the event loop alive
+            // for up to timeoutMs after every prompt that returned normally.
+            clearTimeout(timeoutId);
+        }
     }
 
     const getCleanupRoots = () => {
@@ -1126,7 +1146,10 @@ export function createApp(config) {
             if (!dir) return;
             if (!roots.includes(dir)) roots.push(dir);
         };
-        add(OPENCODE_HOME_BASE ? path.join(OPENCODE_HOME_BASE, '.local', 'share', 'opencode', 'storage') : null);
+        // Read config lazily: ensureBackend() assigns OPENCODE_HOME_BASE after createApp()
+        // has already run, so a destructured copy captured at the top of createApp stays
+        // null forever and this cleanup would silently target nothing on a host run.
+        add(config.OPENCODE_HOME_BASE ? path.join(config.OPENCODE_HOME_BASE, '.local', 'share', 'opencode', 'storage') : null);
         add('/home/node/.local/share/opencode/storage');
         return roots;
     };
@@ -2142,7 +2165,11 @@ export function createApp(config) {
 
                     if (!res.headersSent) {
                         const transformed = transformUpstreamError(error);
-                        res.status(transformed.statusCode).json(transformed.error);
+                        // Must stay wrapped in `error`: every other error path in this file
+                        // writes { error: {...} } and OpenAI clients read body.error.message.
+                        // Writing the bare object produced a 404 whose body had no `error`
+                        // key, which clients surface as an unparseable failure.
+                        res.status(transformed.statusCode).json({ error: transformed.error });
                     } else if (!res.destroyed) {
                         res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`);
                         res.end();
@@ -2942,7 +2969,9 @@ export function createApp(config) {
                 }
                 return res.end();
             }
-            return res.status(transformed.statusCode).json(transformed.error);
+            // Same wrapper requirement as the chat-completions path: OpenAI clients read
+            // body.error.message, so a bare error object is not parseable.
+            return res.status(transformed.statusCode).json({ error: transformed.error });
         }
     });
 
@@ -3258,8 +3287,20 @@ export function startProxy(options) {
             false,
         CLEANUP_INTERVAL_MS: Number.isFinite(cleanupIntervalMs) && cleanupIntervalMs > 0 ? cleanupIntervalMs : 12 * 60 * 60 * 1000,
         CLEANUP_MAX_AGE_MS: Number.isFinite(cleanupMaxAgeMs) && cleanupMaxAgeMs > 0 ? cleanupMaxAgeMs : 24 * 60 * 60 * 1000,
+        // This object is rebuilt from a whitelist, so any key omitted here is invisible to
+        // createApp() no matter what the entrypoint put in its own config. The policy keys
+        // were missing, which left the allow/deny/confirmation lists permanently empty.
+        EXTERNAL_TOOL_POLICY_MODE: options.EXTERNAL_TOOL_POLICY_MODE || process.env.OPENCODE_EXTERNAL_TOOL_POLICY_MODE || 'enforce',
+        EXTERNAL_TOOL_DEFAULT_RISK_LEVEL: options.EXTERNAL_TOOL_DEFAULT_RISK_LEVEL || process.env.OPENCODE_EXTERNAL_TOOL_DEFAULT_RISK_LEVEL || 'low',
+        EXTERNAL_TOOL_ALLOWLIST: Array.isArray(options.EXTERNAL_TOOL_ALLOWLIST) ? options.EXTERNAL_TOOL_ALLOWLIST : [],
+        EXTERNAL_TOOL_DENYLIST: Array.isArray(options.EXTERNAL_TOOL_DENYLIST) ? options.EXTERNAL_TOOL_DENYLIST : [],
+        EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR: Array.isArray(options.EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR) ? options.EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR : [],
+        DEFAULT_MODEL: options.DEFAULT_MODEL || process.env.OPENCODE_DEFAULT_MODEL || '',
+        MAX_CONCURRENT_REQUESTS: Number(options.MAX_CONCURRENT_REQUESTS || process.env.OPENCODE_PROXY_CONCURRENCY || 1),
         OPENCODE_HOME_BASE: options.OPENCODE_HOME_BASE || null
     };
+
+    setMaxConcurrentRequests(config.MAX_CONCURRENT_REQUESTS);
 
     const { app } = createApp(config);
     
@@ -3270,6 +3311,18 @@ export function startProxy(options) {
         } catch (error) {
             console.error('[Proxy] Backend warmup failed:', error.message);
         }
+    });
+
+    // Without this listener a bind failure (EADDRINUSE and friends) is emitted as an
+    // unhandled 'error' event, which crashes the process with an opaque stack instead
+    // of telling the user which port was taken.
+    server.on('error', (error) => {
+        if (error.code === 'EADDRINUSE') {
+            console.error(`[Proxy] Port ${config.PORT} is already in use. Set OPENCODE_PROXY_PORT to a free port.`);
+        } else {
+            console.error('[Proxy] Failed to start listener:', error.message);
+        }
+        process.exit(1);
     });
 
     return {

@@ -52,7 +52,21 @@ const defaultConfig = {
     OMIT_SYSTEM_PROMPT: parseBool(process.env.OPENCODE_PROXY_OMIT_SYSTEM_PROMPT, false),
     AUTO_CLEANUP_CONVERSATIONS: parseBool(process.env.OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS, false),
     CLEANUP_INTERVAL_MS: parseInt(process.env.OPENCODE_PROXY_CLEANUP_INTERVAL_MS) || 43200000,
-    CLEANUP_MAX_AGE_MS: parseInt(process.env.OPENCODE_PROXY_CLEANUP_MAX_AGE_MS) || 86400000
+    CLEANUP_MAX_AGE_MS: parseInt(process.env.OPENCODE_PROXY_CLEANUP_MAX_AGE_MS) || 86400000,
+    // External tool policy. policy.js reads these keys off the config it is handed, but
+    // nothing ever put them there, so the allow/deny/confirmation lists were unreachable
+    // from env or config.json and the policy silently ran with empty sets.
+    EXTERNAL_TOOL_POLICY_MODE: 'enforce',
+    EXTERNAL_TOOL_DEFAULT_RISK_LEVEL: 'low',
+    EXTERNAL_TOOL_ALLOWLIST: parseToolAllowlist(process.env.OPENCODE_EXTERNAL_TOOL_ALLOWLIST, []),
+    EXTERNAL_TOOL_DENYLIST: parseToolAllowlist(process.env.OPENCODE_EXTERNAL_TOOL_DENYLIST, []),
+    EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR: parseToolAllowlist(process.env.OPENCODE_EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR, []),
+    // Model used when a request omits `model`. Empty means "first model the backend lists".
+    DEFAULT_MODEL: process.env.OPENCODE_DEFAULT_MODEL || '',
+    // How many /v1/chat/completions requests may run at once. 1 preserves the historic
+    // fully-serialized behaviour; raise it only once you have confirmed your backend
+    // handles parallel sessions.
+    MAX_CONCURRENT_REQUESTS: parseInt(process.env.OPENCODE_PROXY_CONCURRENCY) || 1
 };
 
 // Load config from file
@@ -97,7 +111,14 @@ const finalConfig = {
     OMIT_SYSTEM_PROMPT: parseBool(process.env.OPENCODE_PROXY_OMIT_SYSTEM_PROMPT, parseBool(fileConfig.OMIT_SYSTEM_PROMPT, defaultConfig.OMIT_SYSTEM_PROMPT)),
     AUTO_CLEANUP_CONVERSATIONS: parseBool(process.env.OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS, parseBool(fileConfig.AUTO_CLEANUP_CONVERSATIONS, defaultConfig.AUTO_CLEANUP_CONVERSATIONS)),
     CLEANUP_INTERVAL_MS: parseInt(process.env.OPENCODE_PROXY_CLEANUP_INTERVAL_MS) || fileConfig.CLEANUP_INTERVAL_MS || defaultConfig.CLEANUP_INTERVAL_MS,
-    CLEANUP_MAX_AGE_MS: parseInt(process.env.OPENCODE_PROXY_CLEANUP_MAX_AGE_MS) || fileConfig.CLEANUP_MAX_AGE_MS || defaultConfig.CLEANUP_MAX_AGE_MS
+    CLEANUP_MAX_AGE_MS: parseInt(process.env.OPENCODE_PROXY_CLEANUP_MAX_AGE_MS) || fileConfig.CLEANUP_MAX_AGE_MS || defaultConfig.CLEANUP_MAX_AGE_MS,
+    EXTERNAL_TOOL_POLICY_MODE: process.env.OPENCODE_EXTERNAL_TOOL_POLICY_MODE || fileConfig.EXTERNAL_TOOL_POLICY_MODE || defaultConfig.EXTERNAL_TOOL_POLICY_MODE,
+    EXTERNAL_TOOL_DEFAULT_RISK_LEVEL: process.env.OPENCODE_EXTERNAL_TOOL_DEFAULT_RISK_LEVEL || fileConfig.EXTERNAL_TOOL_DEFAULT_RISK_LEVEL || defaultConfig.EXTERNAL_TOOL_DEFAULT_RISK_LEVEL,
+    EXTERNAL_TOOL_ALLOWLIST: parseToolAllowlist(process.env.OPENCODE_EXTERNAL_TOOL_ALLOWLIST, parseToolAllowlist(fileConfig.EXTERNAL_TOOL_ALLOWLIST, defaultConfig.EXTERNAL_TOOL_ALLOWLIST)),
+    EXTERNAL_TOOL_DENYLIST: parseToolAllowlist(process.env.OPENCODE_EXTERNAL_TOOL_DENYLIST, parseToolAllowlist(fileConfig.EXTERNAL_TOOL_DENYLIST, defaultConfig.EXTERNAL_TOOL_DENYLIST)),
+    EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR: parseToolAllowlist(process.env.OPENCODE_EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR, parseToolAllowlist(fileConfig.EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR, defaultConfig.EXTERNAL_TOOL_REQUIRE_CONFIRMATION_FOR)),
+    DEFAULT_MODEL: process.env.OPENCODE_DEFAULT_MODEL || fileConfig.DEFAULT_MODEL || defaultConfig.DEFAULT_MODEL,
+    MAX_CONCURRENT_REQUESTS: parseInt(process.env.OPENCODE_PROXY_CONCURRENCY) || fileConfig.MAX_CONCURRENT_REQUESTS || defaultConfig.MAX_CONCURRENT_REQUESTS
 };
 
 // Validate required configuration
