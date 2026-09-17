@@ -108,11 +108,22 @@ else
 fi
 
 for t in $targets; do
-    bcode=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '*' --connect-timeout 5 --max-time 10 \
+    bresp=$(curl -sS -w '\n%{http_code}' --noproxy '*' --connect-timeout 5 --max-time 10 \
         "$t/global/health" 2>/dev/null)
+    bcode=$(last_line "$bresp")
     [ -n "$bcode" ] || bcode=000
+    bbody=$(drop_last "$bresp")
     case "$bcode" in
         000)     pass "$t not reachable";;
+        404)
+            # A plain-text 404 is the reverse proxy's own: no router matches this
+            # hostname, so the backend is simply not published here. Counting it as a
+            # failure was wrong -- it is the state you want.
+            if printf '%s' "$bbody" | grep -q '404 page not found'; then
+                pass "$t -> 404 from the reverse proxy (no router; the backend is not published here)"
+            else
+                fail "$t -> 404, but the body is not the reverse proxy's own: $(printf '%s' "$bbody" | head -c 120)"
+            fi;;
         401|403) pass "$t reachable but requires auth (${bcode})";;
         *)       fail "$t answered ${bcode} WITHOUT authentication. That is the opencode
          backend itself, which can run shell commands and read arbitrary files. Close
@@ -178,13 +189,19 @@ fi
 # output until generation has finished. Comparing the two catches that.
 printf '\n[4/5] POST /v1/chat/completions (streamed, SSE)\n'
 spayload=$(printf '{"model":"%s","messages":[{"role":"user","content":"Count from 1 to 10, one number per line."}],"stream":true,"max_tokens":128}' "$MODEL")
+# Use curl's own instants rather than timestamping each SSE line from a shell read loop.
+# Process creation costs hundreds of milliseconds per call on some systems (measured at
+# ~475ms on Windows/Git Bash), so per-line stamps measure how fast the loop drained its
+# buffer rather than when the bytes arrived. curl's time_starttransfer and time_total are
+# exact and cost nothing.
 sse=$(mktemp)
-timing=$("${CURL[@]}" -N -o "$sse" -w '%{http_code} %{time_starttransfer} %{time_total}' "${AUTH[@]}" \
+metrics=$("${CURL[@]}" -N -o "$sse" -w '%{http_code} %{time_starttransfer} %{time_total}' \
+    "${AUTH[@]}" \
     -H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
     -d "$spayload" "$BASE_URL/v1/chat/completions" 2>/dev/null)
-scode=$(printf '%s' "$timing" | cut -d' ' -f1)
-ttfb=$(printf '%s' "$timing" | cut -d' ' -f2)
-ttot=$(printf '%s' "$timing" | cut -d' ' -f3)
+scode=$(printf '%s' "$metrics" | cut -d' ' -f1)
+ttfb=$(printf '%s' "$metrics" | cut -d' ' -f2)
+ttot=$(printf '%s' "$metrics" | cut -d' ' -f3)
 # grep -c prints "0" AND exits 1 when nothing matches, so a `|| echo 0` fallback would
 # leave the value as "0\n0" and break every later [ -gt ] comparison.
 chunks=$(grep -c '^data:' "$sse" 2>/dev/null)
@@ -196,22 +213,17 @@ if [ "$scode" = "200" ] && [ "$chunks" -gt 0 ]; then
     pass "stream -> 200, ${chunks} SSE chunk(s), first byte at ${ttfb}s, done at ${ttot}s"
     printf '         first chunk: %s\n' "$(grep -m1 '^data:' "$sse" | head -c 160)"
     [ "$done_seen" -gt 0 ] && printf '         terminated with [DONE]\n'
-    # A reasoning model can spend most of the wall clock thinking before it emits its
-    # first token, so "the first byte arrived late" proves nothing on its own -- an
-    # earlier version of this check flagged exactly that and was wrong: 10.4s of
-    # thinking followed by chunks arriving normally is not buffering. What separates a
-    # streamed response from a buffered one is the WINDOW between the first byte and the
-    # last. A buffer releases everything at once, so that window collapses to ~0 while
-    # the total stays long.
-    buffered=$(awk -v a="$ttfb" -v b="$ttot" 'BEGIN { print (b > 1 && (b - a) < b * 0.15) ? "yes" : "no" }')
-    window=$(awk -v a="$ttfb" -v b="$ttot" 'BEGIN { printf "%.2f", b - a }')
-    if [ "$buffered" = "yes" ]; then
-        fail "first byte at ${ttfb}s, last at ${ttot}s -- only ${window}s of streaming
-         window, so the whole body arrived in one burst. Something between you and the
-         container is buffering it. With Traefik, remove the buffering middleware from
-         this router."
+    # A buffer hands the whole body over at once, so the first and last byte nearly
+    # coincide. Compare that window ABSOLUTELY. A ratio test also fires on a short answer
+    # that follows a long first token -- normal for a reasoning model, not buffering --
+    # and it produced false positives here twice before this was rewritten.
+    gap_ms=$(awk -v a="$ttfb" -v b="$ttot" 'BEGIN { printf "%d", (b - a) * 1000 }')
+    if [ "$gap_ms" -lt 100 ]; then
+        fail "only ${gap_ms}ms between the first and last byte, so the body came in one
+         burst. Something between you and the container is buffering it. With Traefik,
+         remove the buffering middleware from this router."
     else
-        pass "chunks arrived over a ${window}s window (first ${ttfb}s, last ${ttot}s), so the response is genuinely streamed"
+        pass "the body streamed over ${gap_ms}ms (first byte ${ttfb}s, last ${ttot}s)"
     fi
 else
     fail "stream -> ${scode} (chunks=${chunks}, body: $(head -c 300 "$sse" 2>/dev/null))"
