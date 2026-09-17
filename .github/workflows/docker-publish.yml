@@ -8,7 +8,12 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: tiarabasori/opencode2api
+  # Derived from the repository owner so a fork publishes into its own namespace.
+  # Hardcoding the upstream owner here made the push fail on any fork: the token can
+  # log in fine, but the fork account has no write access to another user's packages,
+  # so "Build and push Docker image" died with a permission error.
+  # GHCR requires lowercase image names, so the owner must be lowercase.
+  IMAGE_NAME: ${{ github.repository_owner }}/opencode2api
 
 jobs:
   build-and-push:

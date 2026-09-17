@@ -3,7 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/tiarabasori/opencode2api:latest
+    # Matches the image published by .github/workflows/docker-publish.yml for this fork.
+    # Point this back at the upstream namespace if you would rather consume upstream's build.
+    image: ghcr.io/nekohands/opencode2api:latest
     container_name: opencode2api
     ports:
       - "${OPENCODE_PROXY_PORT:-10000}:${OPENCODE_PROXY_PORT:-10000}"
