@@ -70,24 +70,54 @@ if [[ "$1" == "opencode" && "$2" == "serve" ]]; then
     SERVER_PID=$!
     
     echo "Waiting for OpenCode Server to become available..."
-    MAX_RETRIES=30
+    MAX_RETRIES=60
     COUNT=0
-    while ! curl -s http://127.0.0.1:${SERVER_PORT}/health > /dev/null; do
+    # Once OPENCODE_SERVER_PASSWORD is set, the server answers 401 to unauthenticated
+    # probes, so this check must send the same basic-auth credentials the proxy uses
+    # (see buildBackendAuthHeaders in src/proxy.js). Without them the probe never sees a
+    # 2xx, and if the request instead hangs there is no output at all to diagnose with.
+    # /global/health is the route documented by opencode; /health answers as well.
+    HEALTH_URL="http://127.0.0.1:${SERVER_PORT}/global/health"
+    CURL_AUTH=()
+    if [ -n "${OPENCODE_SERVER_PASSWORD}" ]; then
+        CURL_AUTH=(--user "opencode:${OPENCODE_SERVER_PASSWORD}")
+    fi
+
+    while true; do
+        # --noproxy: this is a loopback call and must never go through an HTTP proxy.
+        # If http_proxy is present in the environment, curl hands the request to the
+        # proxy, which cannot reach the container's own 127.0.0.1 — the probe then fails
+        # on every attempt and the proxy is never started.
+        # --max-time keeps a half-open listener from hanging this loop indefinitely.
+        HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 --noproxy '*' \
+            "${CURL_AUTH[@]}" "$HEALTH_URL" 2>/dev/null)
+        CURL_STATUS=$?
+
+        # 2xx means healthy. 401 means the password does not match and 404 means the
+        # route moved — in both cases the listener is demonstrably accepting
+        # connections, so continue and let the proxy report the real error. 000 means no
+        # connection and 5xx is usually a proxy or gateway, so those are worth retrying.
+        case "$HTTP_CODE" in
+            2??|401|404)
+                echo "OpenCode Server is up (${HEALTH_URL} -> HTTP ${HTTP_CODE})."
+                break
+                ;;
+        esac
+
         if [ $COUNT -ge $MAX_RETRIES ]; then
-            echo "Timeout waiting for OpenCode Server."
+            echo "Timeout waiting for OpenCode Server after ${MAX_RETRIES}s (last curl exit ${CURL_STATUS}, HTTP ${HTTP_CODE:-none})."
             kill $SERVER_PID 2>/dev/null
             exit 1
         fi
-        
+
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             echo "OpenCode Server process died unexpectedly."
             exit 1
         fi
-        
+
         sleep 1
         COUNT=$((COUNT+1))
     done
-    echo "OpenCode Server is up!"
 
     echo "Starting OpenAI Proxy on port ${PROXY_PORT}..."
     exec gosu node node index.js
