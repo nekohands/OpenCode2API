@@ -250,8 +250,11 @@ Traefik 的两种兜底要分清楚：
    两个 service，自动链接照样失败。router 和 service 标签要成对增删。
 
 2. **容器在跑吗。** `docker compose ps`。容器没起来，它的 router 会被 Traefik 丢弃 → 404。
-3. **`ipv4_address` 是不是撞了网关。** `172.20.5.0/24` 的 `.1` 是 Docker 网关，容器不能再占，
-   否则 `docker compose up` 直接报 `Address already in use`，容器根本创建不出来。固定 IP 从 `.2` 起。
+3. **`ipv4_address` 是不是撞了网关。** 先用
+   `docker network inspect <net> -f '{{range .IPAM.Config}}{{.Subnet}} gw={{.Gateway}}{{end}}'`
+   看清网段，**别假设 `.1` 一定是网关**：`172.20.5.1` 在 `172.20.0.0/16`（网关 `172.20.0.1`）里
+   完全合法，但在 `172.20.5.0/24` 里就正好是网关。撞上网关会让 `docker compose up` 直接报
+   `Address already in use`，容器根本创建不出来。固定 IP 从 `.2` 起最稳。
 4. **labels 生效了吗。** `docker inspect <容器> -f '{{json .Config.Labels}}'`。若 Traefik 配了
    `providers.docker.exposedByDefault=false`，缺 `traefik.enable=true` 的容器会被完全忽略。
 5. **entrypoint 对得上吗。** router 上的 `traefik.http.routers.<name>.entrypoints` 必须包含你

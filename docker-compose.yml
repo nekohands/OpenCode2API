@@ -9,6 +9,31 @@ services:
     container_name: opencode2api
     ports:
       - "${OPENCODE_PROXY_PORT:-10000}:${OPENCODE_PROXY_PORT:-10000}"
+    # --- 走 Traefik 反代时改用下面的 labels,并把上面的 ports 删掉 ---
+    # 容器接在 Traefik 同一个网络里就不需要发布宿主机端口。
+    #
+    # 关键:`traefik.http.routers.<名字>.service` 不是可有可无的。只要这个容器定义了
+    # **一个以上**的 service(即多写了一条 traefik.http.services.*.loadbalancer.server.port),
+    # 没写 .service 的 router 就无法自动链接 —— Traefik 会在日志里记一行
+    # "cannot be linked automatically with multiple Services",然后**丢弃整个 router**。
+    # 表现是域名返回纯文本 "404 page not found",而容器一直是 Up (healthy),
+    # 网络、socket、entrypoint 全都正常,极难排查。
+    #
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.docker.network=traefik"                    # Traefik 自己所在的网络
+    #   - "traefik.http.routers.opencode2api.entrypoints=websecure"
+    #   - "traefik.http.routers.opencode2api.rule=Host(`opencode.example.com`)"
+    #   - "traefik.http.routers.opencode2api.service=opencode2api"
+    #   - "traefik.http.routers.opencode2api.tls=true"
+    #   - "traefik.http.routers.opencode2api.tls.certresolver=le"
+    #   - "traefik.http.services.opencode2api.loadbalancer.server.port=10000"
+    #
+    # 两点注意:
+    # 1) 不要给这个 router 挂 buffering 中间件。Traefik 的 buffering 会等整个响应体
+    #    缓冲完才转发,/v1/chat/completions 的流式输出会退化成"等模型全部生成完才返回"。
+    # 2) 绝不要把 router 指向容器端口 10001。那是背后的 opencode serve,不是代理:
+    #    它能执行 shell、读任意文件,而且只有设了 OPENCODE_SERVER_PASSWORD 才要求认证。
     environment:
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
