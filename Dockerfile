@@ -14,6 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # postinstall step. When that step is skipped or fails, the install still "succeeds"
 # and leaves a stub that only prints an error, so the container starts and dies with a
 # confusing message. Running `--version` here turns that into a build failure instead.
+#
+# npm 11.19 (currently in node:lts-slim) warns that this postinstall is "not yet covered
+# by allowScripts" but still runs it. Should a future npm stop running it by default,
+# this check fails loudly at build time; the remedy is `--allow-scripts=opencode-ai`.
 RUN npm install -g opencode-ai \
     && opencode --version
 
@@ -52,7 +56,7 @@ ENV OPENCODE_PROXY_PORT=10000
 # Probe /health, never /v1/models: /health is the only operational endpoint that stays
 # reachable without a Bearer token, so the check still passes when API_KEY is set.
 # `curl` is installed explicitly at the top of this file, so it is always available.
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start_period=60s \
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
     CMD curl -fsS "http://localhost:${OPENCODE_PROXY_PORT}/health" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
