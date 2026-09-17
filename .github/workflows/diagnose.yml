@@ -1,0 +1,55 @@
+name: Diagnose opencode install
+
+# Temporary workflow. It reproduces the Dockerfile's `npm install -g opencode-ai`
+# step inside the same base image and republishes the output as a check-run
+# annotation, because job logs require repository admin rights to download while
+# annotations are readable anonymously. Delete this file once the build is green.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/diagnose.yml'
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reproduce the install inside node:lts-slim
+        run: |
+          set +e
+          docker run --rm node:lts-slim bash -c '
+            echo "node=$(node -v) npm=$(npm -v) arch=$(uname -m)"
+            echo "===== INSTALL ====="
+            npm install -g opencode-ai 2>&1 | tail -30
+            echo "INSTALL_EXIT=${PIPESTATUS[0]}"
+            echo "===== BIN DIR ====="
+            ls -la /usr/local/lib/node_modules/opencode-ai/bin/ 2>&1
+            echo "===== PLATFORM PACKAGES ====="
+            ls -d /usr/local/lib/node_modules/opencode-ai/node_modules/* 2>&1 | head -20
+            ls -d /usr/local/lib/node_modules/opencode-* 2>&1 | head -20
+            echo "===== VERSION ====="
+            opencode --version 2>&1
+            echo "VERSION_EXIT=$?"
+            echo "===== CPU AVX2 ====="
+            grep -c avx2 /proc/cpuinfo
+            echo "===== DISK ====="
+            df -h / | tail -1
+          ' > diag.txt 2>&1
+          echo "docker_exit=$?"
+          cat diag.txt
+
+      - name: Republish the output as an annotation
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            let t = "";
+            try { t = fs.readFileSync("diag.txt", "utf8"); } catch (e) { t = "missing diag.txt: " + e.message; }
+            const body = t
+              .slice(0, 60000)
+              .replace(/\r/g, "")
+              .replace(/%/g, "%25")
+              .replace(/\n/g, "%0A");
+            console.log("::warning title=OPENCODE_DIAG::" + body);
+          '
