@@ -9,6 +9,7 @@
 #   MODEL       model id used by the chat tests           (auto-detected from /v1/models)
 #   TIMEOUT     per-request max time, seconds             (default 180)
 #   INSECURE    1 = skip TLS verification                 (default 0)
+#   RESOLVE     host:port:ip, pins DNS for the whole run (see the note below)
 #   BACKEND_URL hostname that must NOT serve the backend opencode server, e.g. a second
 #               Traefik router pointing at container port 10001
 #               (default: the BASE_URL host on port 10001)
@@ -28,6 +29,10 @@ TIMEOUT="${TIMEOUT:-180}"
 # status you read back belongs to the proxy, not to the server under test.
 CURL=(curl -sS --noproxy '*' --connect-timeout 10 --max-time "$TIMEOUT")
 [ "${INSECURE:-0}" = "1" ] && CURL+=(-k)
+# A local TUN proxy (Clash/Surge fake-ip) answers DNS with a synthetic address in
+# 198.18.0.0/15 and then intermittently fails to route it. Pin the real IP to remove the
+# DNS layer entirely: RESOLVE="host:port:1.2.3.4"
+[ -n "${RESOLVE:-}" ] && CURL+=(--resolve "$RESOLVE")
 
 AUTH=()
 [ -n "$API_KEY" ] && AUTH=(-H "Authorization: Bearer ${API_KEY}")
@@ -56,7 +61,11 @@ rule
 printf '\n[1/5] Reachability\n'
 proxy_ok=1
 probe=$(mktemp)
-code=$("${CURL[@]}" -o "$probe" -w '%{http_code}' "$BASE_URL/health" 2>/dev/null) || code=000
+# Judge the captured value, not curl's exit status: on some Windows shells curl exits 23
+# ("client returned ERROR on write") even when it printed the status code correctly, and
+# `|| code=000` would then overwrite a good 200 with 000.
+code=$("${CURL[@]}" -o "$probe" -w '%{http_code}' "$BASE_URL/health" 2>/dev/null)
+[ -n "$code" ] || code=000
 body=$(head -c 300 "$probe" 2>/dev/null)
 rm -f "$probe" 2>/dev/null || true
 
@@ -100,7 +109,8 @@ fi
 
 for t in $targets; do
     bcode=$(curl -sS -o /dev/null -w '%{http_code}' --noproxy '*' --connect-timeout 5 --max-time 10 \
-        "$t/global/health" 2>/dev/null) || bcode=000
+        "$t/global/health" 2>/dev/null)
+    [ -n "$bcode" ] || bcode=000
     case "$bcode" in
         000)     pass "$t not reachable";;
         401|403) pass "$t reachable but requires auth (${bcode})";;
@@ -175,8 +185,12 @@ timing=$("${CURL[@]}" -N -o "$sse" -w '%{http_code} %{time_starttransfer} %{time
 scode=$(printf '%s' "$timing" | cut -d' ' -f1)
 ttfb=$(printf '%s' "$timing" | cut -d' ' -f2)
 ttot=$(printf '%s' "$timing" | cut -d' ' -f3)
-chunks=$(grep -c '^data:' "$sse" 2>/dev/null || echo 0)
-done_seen=$(grep -c '^data: \[DONE\]' "$sse" 2>/dev/null || echo 0)
+# grep -c prints "0" AND exits 1 when nothing matches, so a `|| echo 0` fallback would
+# leave the value as "0\n0" and break every later [ -gt ] comparison.
+chunks=$(grep -c '^data:' "$sse" 2>/dev/null)
+chunks=${chunks:-0}
+done_seen=$(grep -c '^data: \[DONE\]' "$sse" 2>/dev/null)
+done_seen=${done_seen:-0}
 
 if [ "$scode" = "200" ] && [ "$chunks" -gt 0 ]; then
     pass "stream -> 200, ${chunks} SSE chunk(s), first byte at ${ttfb}s, done at ${ttot}s"
