@@ -202,12 +202,11 @@ metrics=$("${CURL[@]}" -N -o "$sse" -w '%{http_code} %{time_starttransfer} %{tim
 scode=$(printf '%s' "$metrics" | cut -d' ' -f1)
 ttfb=$(printf '%s' "$metrics" | cut -d' ' -f2)
 ttot=$(printf '%s' "$metrics" | cut -d' ' -f3)
-# grep -c prints "0" AND exits 1 when nothing matches, so a `|| echo 0` fallback would
-# leave the value as "0\n0" and break every later [ -gt ] comparison.
-chunks=$(grep -c '^data:' "$sse" 2>/dev/null)
-chunks=${chunks:-0}
-done_seen=$(grep -c '^data: \[DONE\]' "$sse" 2>/dev/null)
-done_seen=${done_seen:-0}
+# Count content chunks only: the [DONE] sentinel is a `data:` line too, and including it
+# reported one more chunk than there were actual deltas. awk also sidesteps the
+# `grep -c ... || echo 0` trap, which yields "0\n0" because grep -c prints 0 AND exits 1.
+chunks=$(awk '/^data:/ && $0 != "data: [DONE]" { n++ } END { print n + 0 }' "$sse")
+done_seen=$(awk '$0 == "data: [DONE]" { n++ } END { print n + 0 }' "$sse")
 
 if [ "$scode" = "200" ] && [ "$chunks" -gt 0 ]; then
     pass "stream -> 200, ${chunks} SSE chunk(s), first byte at ${ttfb}s, done at ${ttot}s"

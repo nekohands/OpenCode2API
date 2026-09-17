@@ -132,10 +132,11 @@ ttfb=$(printf '%s' "$metrics" | cut -d' ' -f2)
 ttot=$(printf '%s' "$metrics" | cut -d' ' -f3)
 printf '\nHTTP: %s\n' "${status:-<none>}"
 
-chunks=$(grep -c '^data:' "$body" 2>/dev/null)
-chunks=${chunks:-0}
-done_seen=$(grep -c '^data: \[DONE\]' "$body" 2>/dev/null)
-done_seen=${done_seen:-0}
+# Count content chunks only: the [DONE] sentinel is a `data:` line too, and including it
+# reported one more chunk than there were actual deltas. awk also sidesteps the
+# `grep -c ... || echo 0` trap, which yields "0\n0" because grep -c prints 0 AND exits 1.
+chunks=$(awk '/^data:/ && $0 != "data: [DONE]" { n++ } END { print n + 0 }' "$body")
+done_seen=$(awk '$0 == "data: [DONE]" { n++ } END { print n + 0 }' "$body")
 
 if [ "$chunks" -eq 0 ]; then
     bad "the response contained no SSE chunks at all."
