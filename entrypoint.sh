@@ -72,11 +72,27 @@ if [[ "$1" == "opencode" && "$2" == "serve" ]]; then
     # That matters for diagnosis: opencode logs every outgoing request's headers at DEBUG
     # level, which is the only way to see what it sends upstream.
     #
-    # They are placed BEFORE the hostname and port so the entrypoint's own values win --
-    # the proxy is configured against SERVER_PORT, and starting the backend elsewhere
-    # would look like the backend never came up. Uses a slice rather than `shift` because
-    # the else branch below still needs the original "$@".
-    gosu node opencode serve "${@:3}" --hostname 0.0.0.0 --port ${SERVER_PORT} &
+    # --hostname and --port are filtered out, and that is not cosmetic. opencode turns a
+    # REPEATED option into an array, and with an array the server silently falls back to a
+    # random port -- verified: `serve --port 18130 --port 18131` listens on 54867. The
+    # Dockerfile's default CMD already carries both flags, so forwarding them unfiltered
+    # would break the default startup outright, with the proxy talking to nothing. The
+    # port has to come from OPENCODE_SERVER_PORT regardless, because the proxy is
+    # configured against that same value.
+    #
+    # A positional slice is used rather than `shift` because the else branch below still
+    # needs the original "$@".
+    EXTRA_ARGS=()
+    skip_next=0
+    for arg in "${@:3}"; do
+        if [ "$skip_next" = "1" ]; then skip_next=0; continue; fi
+        case "$arg" in
+            --hostname|--port) skip_next=1; continue;;
+            --hostname=*|--port=*) continue;;
+        esac
+        EXTRA_ARGS+=("$arg")
+    done
+    gosu node opencode serve "${EXTRA_ARGS[@]}" --hostname 0.0.0.0 --port ${SERVER_PORT} &
     SERVER_PID=$!
     
     echo "Waiting for OpenCode Server to become available..."
