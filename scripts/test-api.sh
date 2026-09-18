@@ -10,6 +10,8 @@
 #   TIMEOUT     per-request max time, seconds             (default 180)
 #   INSECURE    1 = skip TLS verification                 (default 0)
 #   RESOLVE     host:port:ip, pins DNS for the whole run (see the note below)
+#   SWEEP       1 = test every model and exit, instead of just one
+#   SWEEP_TIMEOUT  per-model max time during a sweep      (default 45)
 #   BACKEND_URL hostname that must NOT serve the backend opencode server, e.g. a second
 #               Traefik router pointing at container port 10001
 #               (default: the BASE_URL host on port 10001)
@@ -161,6 +163,43 @@ if [ -z "$MODEL" ]; then
     printf 'passed=%s failed=%s\n' "$ok" "$bad"
     exit 1
 fi
+
+# ------------------------------------------------------------------- SWEEP mode
+# SWEEP=1 tests every model the endpoint reports and exits, instead of just one.
+# Model availability is not stable -- a channel gets disabled, a model gets region
+# blocked, an upstream starts rejecting a whole class of requests -- and when that
+# happens the only way to know which models still answer is to ask each one. A minimal
+# request keeps the sweep cheap. Real output from a deployment where this mattered:
+# 3 of 18 models worked, and the 5 that failed with one identical upstream error were
+# all served by the same channel.
+if [ "${SWEEP:-0}" = "1" ]; then
+    printf '\nSweep: testing all %s model(s) with a minimal request\n' "$(printf '%s\n' "$ids" | grep -c .)"
+    rule
+    sw_ok=0
+    sw_bad=0
+    for m in $ids; do
+        out=$("${CURL[@]}" --max-time "${SWEEP_TIMEOUT:-45}" "${AUTH[@]}" \
+            -H 'Content-Type: application/json' \
+            -d "$(printf '{"model":"%s","messages":[{"role":"user","content":"hi"}],"max_tokens":8,"stream":false}' "$m")" \
+            "$BASE_URL/v1/chat/completions" 2>/dev/null)
+        if printf '%s' "$out" | grep -q '"choices"'; then
+            printf '  %-36s OK\n' "$m"
+            sw_ok=$((sw_ok + 1))
+        else
+            msg=$(printf '%s' "$out" \
+                | sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+            [ -n "$msg" ] || msg=$(printf '%s' "$out" | head -c 70)
+            [ -n "$msg" ] || msg="<empty response>"
+            printf '  %-36s FAIL: %s\n' "$m" "$msg"
+            sw_bad=$((sw_bad + 1))
+        fi
+    done
+    rule
+    printf 'usable=%s unusable=%s\n' "$sw_ok" "$sw_bad"
+    [ "$sw_bad" -eq 0 ] || exit 1
+    exit 0
+fi
+
 printf '\nUsing model: %s\n' "$MODEL"
 
 # ------------------------------------------------------------ 3. non-streamed call
