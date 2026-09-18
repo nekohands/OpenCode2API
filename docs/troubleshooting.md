@@ -126,9 +126,32 @@ curl -H "Authorization: Bearer YOUR_API_KEY" ...
 {"error":{"message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode","type":"APIError"}}
 ```
 
-**这不是本项目的报错,是上游 OpenCode Zen 的。** 上游对请求做客户端指纹校验
-(`User-Agent` 与 `x-opencode-*` 请求头),只放行看起来由 OpenCode 客户端发出的请求,
+**这不是本项目的报错,是上游 OpenCode Zen 的。** 上游对请求做客户端指纹校验,
 免费额度被明确限制为「只能在 OpenCode 内使用」。上游 issue:`anomalyco/opencode#49433`。
+
+**先查账号,再怀疑别的。** 官方二进制(opencode 1.18.31 实测)在 provider id 以 `opencode`
+开头时会无条件附带这几个头:
+
+```js
+"x-opencode-project": <项目 id>,
+"x-opencode-session": <session id>,
+"x-opencode-request": user.id,        // 账号 id
+"x-opencode-client":  flags.client,
+"User-Agent": ...
+```
+
+其中 **`x-opencode-request` 取的是登录账号的 id**。所以本项目的请求确实是官方客户端发出的,
+但**只要容器里的 opencode 没有有效账号,这个头就是空的**,上游便按"免费额度"拒绝:
+
+```bash
+# 账号状态存在挂载卷里(compose 中是 opencode-data)
+docker exec opencode opencode auth list
+docker exec opencode sh -c 'head -c 200 /home/node/.local/share/opencode/account.json'
+# 为空则重新登录
+docker exec -it opencode opencode auth login
+```
+
+**重建容器时若换了卷或卷被重置,账号会一起丢掉** —— 这是"昨天能用今天不能用"最常见的原因。
 
 因此:
 
