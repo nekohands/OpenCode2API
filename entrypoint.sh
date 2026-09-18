@@ -66,7 +66,17 @@ if [[ "$1" == "opencode" && "$2" == "serve" ]]; then
     echo "Initializing OpenCode-to-OpenAI (Server + Proxy)"
     
     echo "Starting OpenCode Server on internal port ${SERVER_PORT}..."
-    gosu node opencode serve --hostname 0.0.0.0 --port ${SERVER_PORT} &
+    # Forward any arguments after "opencode serve" so flags can be given from the
+    # container command instead of requiring a rebuilt image, e.g.
+    #   command: ["opencode", "serve", "--log-level", "DEBUG", "--print-logs"]
+    # That matters for diagnosis: opencode logs every outgoing request's headers at DEBUG
+    # level, which is the only way to see what it sends upstream.
+    #
+    # They are placed BEFORE the hostname and port so the entrypoint's own values win --
+    # the proxy is configured against SERVER_PORT, and starting the backend elsewhere
+    # would look like the backend never came up. Uses a slice rather than `shift` because
+    # the else branch below still needs the original "$@".
+    gosu node opencode serve "${@:3}" --hostname 0.0.0.0 --port ${SERVER_PORT} &
     SERVER_PID=$!
     
     echo "Waiting for OpenCode Server to become available..."
