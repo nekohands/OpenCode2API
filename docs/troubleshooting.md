@@ -120,6 +120,31 @@ curl -H "Authorization: Bearer YOUR_API_KEY" ...
 
 ---
 
+### 9️⃣ 报 `OpenCode's free tier can only be used from within OpenCode`
+
+```json
+{"error":{"message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode","type":"APIError"}}
+```
+
+**这不是本项目的报错,是上游 OpenCode Zen 的。** 上游对请求做客户端指纹校验
+(`User-Agent` 与 `x-opencode-*` 请求头),只放行看起来由 OpenCode 客户端发出的请求,
+免费额度被明确限制为「只能在 OpenCode 内使用」。上游 issue:`anomalyco/opencode#49433`。
+
+因此:
+
+- **本项目无法通过改代码解决它。** 网上流传的"办法"是伪造这些请求头,让上游误以为请求来自
+  官方客户端 —— 那是刻意规避服务方的访问控制,违反其使用条款,也可能导致账号被封。
+  本项目不做这件事,也不会提供这类代码。
+- **可用的替代**:同一账号下走其他渠道的模型不受影响。实测 `deepseek-v4-flash`、
+  `ag/deepseek-v4-flash` 正常返回,`ag/claude-opus-4-8`、`gemini-3.8-flash` 等也在列。
+- **若持有 OpenCode Zen 的付费套餐**,免费额度限制不适用;请确认后端使用的是付费凭据。
+- 该报错在流式路径下可能被吞成**空完成**(`finish_reason: stop` 且 `completion_tokens: 0`),
+  客户端表现为「成功但内容为空」。遇到空回复时,先用非流式请求复现,才能看到真正的错误信息。
+
+> 换模型时注意模型名可能被网关改写:opencode2api 的 `opencode/mimo-v2.5-free`
+> 在 new-api 里可能叫 `mimo-v2.5`。用错名字会得到
+> `Model not found: opencode/<名字>`,那是模型名问题,不是渠道故障。
+
 ## 🔍 调试模式
 
 开启调试日志:
