@@ -129,29 +129,24 @@ curl -H "Authorization: Bearer YOUR_API_KEY" ...
 **这不是本项目的报错,是上游 OpenCode Zen 的。** 上游对请求做客户端指纹校验,
 免费额度被明确限制为「只能在 OpenCode 内使用」。上游 issue:`anomalyco/opencode#49433`。
 
-**先查账号,再怀疑别的。** 官方二进制(opencode 1.18.31 实测)在 provider id 以 `opencode`
-开头时会无条件附带这几个头:
+**请求确实带指纹,但指纹不等于账号。** 官方二进制(opencode 1.18.31 实测)在 provider id 以
+`opencode` 开头时会附带这几个头:
 
 ```js
-"x-opencode-project": <项目 id>,
+"x-opencode-project": <项目 id>,       // 仅当有项目时
 "x-opencode-session": <session id>,
-"x-opencode-request": user.id,        // 账号 id
-"x-opencode-client":  flags.client,
-"User-Agent": ...
+"x-opencode-request": user.id,         // 登录后是账号 id
+"x-opencode-client":  flags.client,    // 来自 OPENCODE_CLIENT 环境变量
+"User-Agent": "opencode/<版本>"        // 启动器以 --user-agent= 传入
 ```
 
-其中 **`x-opencode-request` 取的是登录账号的 id**。所以本项目的请求确实是官方客户端发出的,
-但**只要容器里的 opencode 没有有效账号,这个头就是空的**,上游便按"免费额度"拒绝:
+**不要把"没有账号"当成结论:opencode 不登录也能使用免费额度。** 上游校验的是整体指纹,
+不是登录状态。上游另有一条 `1.17.0 or newer is required` 的版本校验(见 issue #49433),
+而 `User-Agent` 形如 `opencode/1.18.31`,由启动器传入。
 
-```bash
-# 账号状态存在挂载卷里(compose 中是 opencode-data)
-docker exec opencode opencode auth list
-docker exec opencode sh -c 'head -c 200 /home/node/.local/share/opencode/account.json'
-# 为空则重新登录
-docker exec -it opencode opencode auth login
-```
-
-**重建容器时若换了卷或卷被重置,账号会一起丢掉** —— 这是"昨天能用今天不能用"最常见的原因。
+如果 CLI 能正常使用、而经本项目转发的请求被拒,差异就在无头服务端发出的那次请求上。
+定位它需要抓包看实际请求头 —— 那正是上游的判定依据。**把抓到的头报到上游 issue
+`anomalyco/opencode#49433` 比在本项目里绕更合适**,也更可能被真正修掉。
 
 因此:
 
