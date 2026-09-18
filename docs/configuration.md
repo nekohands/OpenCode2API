@@ -54,7 +54,7 @@
 |:-----|:-------|:-----|
 | `DEBUG` / `OPENCODE_PROXY_DEBUG` | `false` | 开启调试日志 |
 | `OPENCODE_PATH` | `opencode` | OpenCode 可执行文件路径 |
-| `OPENCODE_ZEN_API_KEY` | - | Zen API Key 透传 |
+| `OPENCODE_ZEN_API_KEY` | - | **无效果**:opencode 不读这个变量,也不能当 serve 参数传。上游凭据来自数据卷里的 OpenCode 账号(`opencode auth login`) |
 
 ---
 

@@ -3155,9 +3155,21 @@ async function ensureBackend(config) {
             shell: useShell  // Use shell only when needed (e.g., Windows .cmd or unresolved PATH)
         };
 
+        // `opencode serve` has no --password flag. Checked against 1.18.31: --help lists
+        // only port, hostname, mdns, mdns-domain, cors, log-level, print-logs and pure.
+        // Passing an unknown option makes the CLI print its help and EXIT WITHOUT
+        // STARTING, so the old `if (ZEN_API_KEY) push('--password', ZEN_API_KEY)` took the
+        // backend down instead of configuring anything.
+        //
+        // The variable is also misnamed: opencode does not read OPENCODE_ZEN_API_KEY.
+        // Searching the 1.18.31 binary for OPENCODE_* env names turns up
+        // OPENCODE_SERVER_PASSWORD / OPENCODE_SERVER_USERNAME for the local server and
+        // OPENCODE_AUTH_CONTENT / OPENCODE_CONSOLE_TOKEN for credentials -- none of which
+        // this variable reaches. Upstream credentials live in the OpenCode account under
+        // the data volume, created by `opencode auth login`.
         const spawnArgs = ['serve', '--port', port, '--hostname', '127.0.0.1'];
         if (ZEN_API_KEY) {
-            spawnArgs.push('--password', ZEN_API_KEY);
+            console.warn('[Proxy] OPENCODE_ZEN_API_KEY is set but has no effect. opencode does not read it, and it cannot be passed as a serve flag. Upstream credentials come from the OpenCode account in the data volume (opencode auth login).');
         }
         state.process = spawn(opencodeBin, spawnArgs, spawnOptions);
 
